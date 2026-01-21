@@ -1,11 +1,13 @@
-import pandas as pd
 import struct
 from pathlib import Path
+
+import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.chart import LineChart, Reference
 
-INPUT_FILE = "can_messages.csv"          # или .xlsx
-OUTPUT_FILE = "pid_decoded_with_charts.xlsx"
+# --- GUI ---
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
 PID_IDS = {
     0x27: "PV",
@@ -19,8 +21,8 @@ PID_IDS = {
     0x35: "Kd",
 }
 
-# какие сигналы рисуем на одном графике
 PLOT_SIGNALS = ["CV", "CV_P", "CV_I", "CV_D", "PV", "SP"]
+
 
 def load_table(path: Path) -> pd.DataFrame:
     suf = path.suffix.lower()
@@ -30,9 +32,11 @@ def load_table(path: Path) -> pd.DataFrame:
         return pd.read_excel(path)
     raise ValueError("Поддерживаются только CSV и Excel")
 
+
 def bytes_list_to_float_le(hex_bytes_4) -> float:
     b = bytes(int(x, 16) for x in hex_bytes_4)
     return struct.unpack("<f", b)[0]
+
 
 def add_one_chart(ws, title, x_col_idx, y_col_indices, anchor_cell):
     max_row = ws.max_row
@@ -53,13 +57,14 @@ def add_one_chart(ws, title, x_col_idx, y_col_indices, anchor_cell):
 
     ws.add_chart(chart, anchor_cell)
 
-def main():
-    df = load_table(Path(INPUT_FILE))
+
+def convert_file(input_file: Path, output_file: Path):
+    df = load_table(input_file)
 
     if "Data" not in df.columns:
-        raise ValueError("Не найдена колонка 'Data'.")
+        raise ValueError("Не найдена колонка 'Data' во входном файле.")
     if "Timestamp" not in df.columns:
-        raise ValueError("Не найдена колонка 'Timestamp'.")
+        raise ValueError("Не найдена колонка 'Timestamp' во входном файле.")
 
     ts = pd.to_datetime(df["Timestamp"], errors="coerce")
 
@@ -80,32 +85,30 @@ def main():
 
     decoded = pd.DataFrame(rows).sort_values("Timestamp")
     if decoded.empty:
-        raise ValueError("Не удалось декодировать ни одной записи (проверь Data/ID).")
+        raise ValueError("Не удалось декодировать ни одной записи. Проверь формат 'Data' и ID сообщений.")
 
     # t, сек от начала
     t0 = decoded["Timestamp"].iloc[0]
     decoded["TimeSec"] = (decoded["Timestamp"] - t0).dt.total_seconds()
 
-    # wide-таблица по времени (последнее значение на момент)
+    # wide-таблица по времени + заполнение последним значением
     wide = decoded.pivot_table(
         index="TimeSec", columns="Signal", values="Value", aggfunc="last"
     ).sort_index().ffill()
 
     out_df = wide.reset_index()
 
-    # Один лист data
+    # Запись в Excel
     sheet_name = "data"
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         out_df.to_excel(writer, sheet_name=sheet_name, index=False)
 
-    # Добавляем ОДИН график
-    wb = load_workbook(OUTPUT_FILE)
+    # Добавляем один график
+    wb = load_workbook(output_file)
     ws = wb[sheet_name]
 
     headers = {ws.cell(row=1, column=c).value: c for c in range(1, ws.max_column + 1)}
     x_col = headers["TimeSec"]
-
-    # какие сигналы реально присутствуют в файле
     y_cols = [headers[s] for s in PLOT_SIGNALS if s in headers]
 
     add_one_chart(
@@ -113,11 +116,44 @@ def main():
         "PID signals: CV, CV_P, CV_I, CV_D, PV, SP",
         x_col,
         y_cols,
-        "L2"  # позиция графика
+        "L2"
     )
 
-    wb.save(OUTPUT_FILE)
-    print(f"Готово: {OUTPUT_FILE}")
+    wb.save(output_file)
+
+
+def main():
+    root = tk.Tk()
+    root.withdraw()  # не показываем пустое главное окно
+
+    in_path = filedialog.askopenfilename(
+        title="Выберите входной файл (CSV или Excel)",
+        filetypes=[
+            ("CSV files", "*.csv"),
+            ("Excel files", "*.xlsx *.xls"),
+            ("All files", "*.*"),
+        ],
+    )
+    if not in_path:
+        return
+
+    out_path = filedialog.asksaveasfilename(
+        title="Сохранить результат как...",
+        defaultextension=".xlsx",
+        filetypes=[("Excel files", "*.xlsx")],
+        initialfile="pid_decoded_with_charts.xlsx",
+    )
+    if not out_path:
+        return
+
+    try:
+        convert_file(Path(in_path), Path(out_path))
+    except Exception as e:
+        messagebox.showerror("Ошибка", str(e))
+        return
+
+    messagebox.showinfo("Готово", f"Файл создан:\n{out_path}")
+
 
 if __name__ == "__main__":
     main()
